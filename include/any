@@ -141,7 +141,8 @@ namespace __any_imp
     _Copy,
     _Move,
     _Get,
-    _TypeInfo
+    _TypeInfo,
+    _Invoker
   };
 
   template <class _Tp> struct _SmallHandler;
@@ -173,6 +174,35 @@ namespace __any_imp
   template <class _Tp>
   using _Handler = conditional_t<
     _IsSmallObject<_Tp>::value, _SmallHandler<_Tp>, _LargeHandler<_Tp>>;
+
+  template<class> struct _remove_class;
+  template<class _C, class _R, class... _A>
+  struct _remove_class<_R(_C::*)(_A...)> { using _type = _R(_A...); };
+  template<class _C, class _R, class... _A>
+  struct _remove_class<_R(_C::*)(_A...) const> { using _type = _R(_A...); };
+  template<class _C, class _R, class... _A>
+  struct _remove_class<_R(_C::*)(_A...) volatile> { using _type = _R(_A...); };
+  template<class _C, class _R, class... _A>
+  struct _remove_class<_R(_C::*)(_A...) const volatile> { using _type = _R(_A...); };
+
+  template<class _T,
+    class _S = typename _remove_class<decltype(&_VSTD::remove_reference_t<_T>::operator())>::_type>
+  struct _to_sig { using _type = _S; };
+  template<class _R, class... _A> struct _to_sig<_R(_A...)> { using _type = _R(_A...); };
+  template<class _R, class... _A> struct _to_sig<_R(&)(_A...)> { using _type = _R(_A...); };
+  template<class _R, class... _A> struct _to_sig<_R(*)(_A...)> { using _type = _R(_A...); };
+
+  template<class> struct _make_inv_type;
+  template<class _R, class... _A> struct _make_inv_type<_R(_A...)> { using _type = _R(any&, _A&&...); };
+
+  template<class _Tp, class _Sig = typename _to_sig<_Tp>::_type>
+  void* __invoker(type_info const* __id, const void* __fallback_id) {
+    static typename _make_inv_type<_Sig>::_type* const _inv = &_Handler<_Tp>::__invoke;
+    if (__compare_typeid<_Sig>(__id, __fallback_id))
+      return const_cast<void*>(static_cast<void const*>(&_inv));
+    return nullptr;
+  }
+  template<class _Tp> void* __invoker(...) { return nullptr; }
 
 } // namespace __any_imp
 
@@ -291,6 +321,16 @@ public:
   }
 #endif
 
+  template<class _Sig, class... _A, class _Inv = typename __any_imp::_make_inv_type<_Sig>::_type>
+  _LIBCPP_INLINE_VISIBILITY
+  _VSTD::result_of_t<_VSTD::add_pointer_t<_Sig>(_A...)> invoke(_A&&... _a) {
+    if (__h)
+      if (void* _ptr = this->__call(_Action::_Invoker, nullptr,
+            &typeid(_Sig), __any_imp::__get_fallback_typeid<_Sig>()))
+        return (*static_cast<_Inv* const*>(_ptr))(*this, _VSTD::forward<_A>(_a)...);
+    __throw_bad_any_cast();
+  }
+
 private:
     typedef __any_imp::_Action _Action;
     using _HandleFuncPtr =  void* (*)(_Action, any const *, any *, const type_info *,
@@ -359,6 +399,8 @@ namespace __any_imp
             return __get(const_cast<any &>(*__this), __info, __fallback_info);
         case _Action::_TypeInfo:
           return __type_info();
+        case _Action::_Invoker:
+          return __invoker(__info, __fallback_info);
         }
     }
 
@@ -367,6 +409,12 @@ namespace __any_imp
     static void __create(any & __dest, _Args&&... __args) {
         ::new (static_cast<void*>(&__dest.__s.__buf)) _Tp(_VSTD::forward<_Args>(__args)...);
         __dest.__h = &_SmallHandler::__handle;
+    }
+
+    template<class _R, class... _A>
+    _LIBCPP_INLINE_VISIBILITY
+    static _R __invoke(any& __this, _A&&... _a) {
+        return (*static_cast<_Tp*>(static_cast<void*>(&__this.__s.__buf)))(_VSTD::forward<_A>(_a)...);
     }
 
   private:
@@ -409,6 +457,11 @@ namespace __any_imp
         return nullptr;
 #endif
     }
+
+    _LIBCPP_INLINE_VISIBILITY
+    static void* __invoker(type_info const * __info, void const* __fallback_info) {
+      return __any_imp::__invoker<_Tp>(__info, __fallback_info);
+    }
   };
 
   template <class _Tp>
@@ -434,6 +487,8 @@ namespace __any_imp
             return __get(const_cast<any &>(*__this), __info, __fallback_info);
         case _Action::_TypeInfo:
           return __type_info();
+        case _Action::_Invoker:
+          return __invoker(__info, __fallback_info);
         }
     }
 
@@ -447,6 +502,12 @@ namespace __any_imp
         ::new ((void*)__hold.get()) _Tp(_VSTD::forward<_Args>(__args)...);
         __dest.__s.__ptr = __hold.release();
         __dest.__h = &_LargeHandler::__handle;
+    }
+
+    template<class _R, class... _A>
+    _LIBCPP_INLINE_VISIBILITY
+    static _R __invoke(any& __this, _A&&... _a) {
+        return (*static_cast<_Tp*>(__this.__s.__ptr))(_VSTD::forward<_A>(_a)...);
     }
 
   private:
@@ -487,6 +548,11 @@ namespace __any_imp
 #else
         return nullptr;
 #endif
+    }
+
+    _LIBCPP_INLINE_VISIBILITY
+    static void* __invoker(type_info const * __info, void const* __fallback_info) {
+      return __any_imp::__invoker<_Tp>(__info, __fallback_info);
     }
   };
 
